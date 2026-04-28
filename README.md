@@ -42,7 +42,7 @@ This project is an AI-powered disease prediction agent that uses BioBERT to anal
 5. **Start the Application**:
    Run the convenience script:
    ```bash
-   python run.py
+   python start_all.py
    ```
    This will start the FastAPI server and open the dashboard in your default browser.
 
