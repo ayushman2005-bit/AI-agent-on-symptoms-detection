@@ -8,7 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Health AI Agent API")
 
-# Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,53 +15,102 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load model and tokenizer
-# In a production environment, you'd load the fine-tuned model
-# For this template, we'll use a placeholder or logic to load the model
-MODEL_PATH = "./saved_model"
+# Resolve paths relative to THIS file's directory (backend/)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "saved_model")
+LABEL_ENCODER_PATH = os.path.join(BASE_DIR, "label_encoder.joblib")
 DEFAULT_MODEL = "dmis-lab/biobert-base-cased-v1.1"
 
-try:
-    if os.path.exists(MODEL_PATH):
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-        model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
-    else:
-        # Fallback to base model for demonstration if not trained
-        tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL)
-        model = AutoModelForSequenceClassification.from_pretrained(DEFAULT_MODEL, num_labels=41) # 41 is the number of diseases in the dataset
-    
-    le = joblib.load('label_encoder.joblib')
-except Exception as e:
-    print(f"Error loading model: {e}")
-    model = None
-    tokenizer = None
+model = None
+tokenizer = None
+le = None
+
+def load_model():
+    global model, tokenizer, le
+    try:
+        if os.path.exists(MODEL_PATH):
+            print(f"Loading fine-tuned model from {MODEL_PATH}...")
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+            model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
+        else:
+            print(f"No saved model found at {MODEL_PATH}. Loading base BioBERT model...")
+            tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL)
+            model = AutoModelForSequenceClassification.from_pretrained(DEFAULT_MODEL, num_labels=41)
+
+        if os.path.exists(LABEL_ENCODER_PATH):
+            le = joblib.load(LABEL_ENCODER_PATH)
+            print("Label encoder loaded successfully.")
+        else:
+            print(f"WARNING: label_encoder.joblib not found at {LABEL_ENCODER_PATH}.")
+            le = None
+
+        model.eval()
+        print("Model loaded and ready.")
+    except Exception as e:
+        print(f"ERROR loading model: {e}")
+        model = None
+        tokenizer = None
+        le = None
+
+# Load on startup
+load_model()
 
 class SymptomInput(BaseModel):
     symptoms: str
 
 @app.post("/predict")
 async def predict(input_data: SymptomInput):
-    if not model or not tokenizer:
-        # Mock prediction if model isn't loaded for some reason
-        return {"disease": "Sample Disease (Model not loaded)", "confidence": 0.95}
-    
-    inputs = tokenizer(input_data.symptoms, return_tensors="pt", padding=True, truncation=True, max_length=128)
-    
-    with torch.no_grad():
-        outputs = model(**inputs)
-        probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
-        conf, pred = torch.max(probs, dim=-1)
-        
-    disease = le.inverse_transform([pred.item()])[0]
-    
-    return {
-        "disease": disease,
-        "confidence": float(conf.item())
-    }
+    symptoms = input_data.symptoms.strip()
+    if not symptoms:
+        raise HTTPException(status_code=400, detail="Symptoms cannot be empty.")
+
+    # Fallback mock if model failed to load
+    if model is None or tokenizer is None:
+        return {
+            "disease": "Model not loaded (check server logs)",
+            "confidence": 0.0,
+            "warning": "Model could not be loaded. This is a mock response."
+        }
+
+    try:
+        inputs = tokenizer(
+            symptoms,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=128
+        )
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+            probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            conf, pred = torch.max(probs, dim=-1)
+
+        pred_idx = pred.item()
+
+        # Decode label
+        if le is not None:
+            try:
+                disease = le.inverse_transform([pred_idx])[0]
+            except Exception:
+                disease = f"Class {pred_idx}"
+        else:
+            disease = f"Class {pred_idx} (label encoder missing)"
+
+        return {
+            "disease": disease,
+            "confidence": round(float(conf.item()), 4)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "label_encoder_loaded": le is not None
+    }
 
 if __name__ == "__main__":
     import uvicorn
